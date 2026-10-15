@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Budget Ledger – SCOUP Shop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@500;700;800;900&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>SCOUP budget ledger · monthly allowance shop</h1>
+    </div>
+    <div class="group">
+      <label for="groupName">Group</label>
+      <input id="groupName" type="text" placeholder="Write your group name" maxlength="40" autocomplete="off">
+    </div>
+  </header>
+
+  <dl class="summary" id="summary">
+    <div><dt>Starting budget</dt><dd id="sBudget"></dd></div>
+    <div><dt>Spent</dt><dd id="sSpent"></dd></div>
+    <div class="remaining" id="remBox"><dt>Remaining</dt><dd id="sRemaining"></dd></div>
+    <div><dt>Items bought</dt><dd id="sCount"></dd></div>
+  </dl>
+  <div class="meter" id="meter" aria-hidden="true"><span id="meterFill"></span></div>
+  <p class="status" id="status" role="status" aria-live="polite"></p>
+
+  <div class="main">
+    <section class="ledger" aria-label="Shop ledger">
+      <div class="tools">
+        <input type="search" id="search" placeholder="Search items" aria-label="Search items">
+        <div class="chips" id="chips" role="group" aria-label="Filter by product type"></div>
+        <p class="hint" id="hint"></p>
+      </div>
+      <div class="scroller">
+        <table>
+          <colgroup><col class="c-type"><col class="c-name"><col class="c-price"><col class="c-pts"></colgroup>
+          <thead>
+            <tr>
+              <th scope="col" aria-sort="none" data-key="type"><button type="button">Product type <span class="arrow"></span></button></th>
+              <th scope="col" aria-sort="none" data-key="name"><button type="button">Name <span class="arrow"></span></button></th>
+              <th scope="col" class="num" aria-sort="none" data-key="price"><button type="button">Price (VNĐ) <span class="arrow"></span></button></th>
+              <th scope="col" class="num"><span class="plain">Point</span></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside class="receipt" aria-label="Your purchases">
+      <h2>Your purchases</h2>
+      <div id="receiptBody"></div>
+      <div class="totals" id="totalsBox">
+        <div><span>Items</span><span id="rCount">0</span></div>
+        <div class="grand"><span>Total price</span><span id="rSpent">0</span></div>
+      </div>
+      <div class="result" id="result" tabindex="-1" hidden>
+        <h3>Submitted</h3>
+        <p class="rg" id="rGroup" hidden></p>
+        <dl class="rgrid two">
+          <div><dt>Items</dt><dd id="fItems"></dd></div>
+          <div><dt>Total price (VNĐ)</dt><dd id="fPrice"></dd></div>
+        </dl>
+        <div class="actions">
+          <a class="dl" id="openResult" href="scores.html">See your result and points</a>
+        </div>
+      </div>
+      <button type="button" class="submit" id="submit">Submit purchases</button>
+      <button type="button" class="reset" id="reset">Start over</button>
+    </aside>
+  </div>
+
+  <footer class="foot">
+    <p>Prices come from the SCOUP event sheet.</p>
+    <p><span class="dagger">†</span> The sheet lists underwear at “150 VNĐ”; this shop uses 150.000 VNĐ. Change it in <code>items.js</code> if that is wrong.</p>
+  </footer>
+</div>
+
+<script src="items.js"></script>
+<script>
+(function () {
+  var BUDGET = 7000000;
+  var STORE_KEY = "scoup-shop-v2";
+  var RESULT_PAGE = "scores.html";
+  // Paste your Google Apps Script web app URL here to send every submission to the shared sheet (see apps-script.gs).
+  var SUBMIT_URL = "";
+
+  var ITEMS = window.SCOUP_ITEMS || [];
+  var BYID = {};
+  ITEMS.forEach(function (it, i) { it.idx = i; BYID[it.id] = it; });
+  var TYPES = [];
+  ITEMS.forEach(function (it) { if (TYPES.indexOf(it.type) < 0) TYPES.push(it.type); });
+  var CHEAPEST = Math.min.apply(null, ITEMS.map(function (i) { return i.price; }));
+
+  var state = { group: "", qty: {}, submitted: false, submittedAt: 0 };
+  var view = { type: "All", q: "", sortKey: null, sortDir: 1 };
+
+  function $(id) { return document.getElementById(id); }
+  function fmt(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, "."); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+
+  function load() {
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      var s = JSON.parse(raw);
+      if (!s || typeof s !== "object") return;
+      state.group = typeof s.group === "string" ? s.group : "";
+      var q = {}, total = 0;
+      Object.keys(s.qty || {}).forEach(function (id) {
+        var n = Math.floor(+s.qty[id]);
+        if (BYID[id] && n > 0) { q[id] = n; total += BYID[id].price * n; }
+      });
+      if (total <= BUDGET) {
+        state.qty = q;
+        state.submitted = s.submitted === true && total > 0;
+        state.submittedAt = state.submitted && +s.submittedAt > 0 ? +s.submittedAt : 0;
+      }
+    } catch (e) { /* storage unavailable: start empty */ }
+  }
+  function save() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {}
+  }
+
+  function totals() {
+    var spent = 0, count = 0;
+    Object.keys(state.qty).forEach(function (id) {
+      var n = state.qty[id];
+      spent += BYID[id].price * n; count += n;
+    });
+    return { spent: spent, count: count, left: BUDGET - spent };
+  }
+
+  function resultLink() {
+    var q = Object.keys(state.qty).map(function (id) { return id + ":" + state.qty[id]; }).join(",");
+    var p = new URLSearchParams();
+    p.set("g", state.group.trim().replace(/\s+/g, " "));
+    p.set("t", String(state.submittedAt || Date.now()));
+    p.set("q", q);
+    return RESULT_PAGE + "#" + p.toString();
+  }
+
+  /* Send the result to the shared sheet (fire and forget; the result page still works without it) */
+  function sendResult() {
+    if (!SUBMIT_URL) return;
+    var q = Object.keys(state.qty).map(function (id) { return id + ":" + state.qty[id]; }).join(",");
+    try {
+      fetch(SUBMIT_URL, {
+        method: "POST", mode: "no-cors", keepalive: true,
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ g: state.group.trim().replace(/\s+/g, " "), t: state.submittedAt, q: q })
+      });
+    } catch (e) {}
+  }
+
+  /* ---------- status ---------- */
+  var statusTimer;
+  function say(msg, cls) {
+    var el = $("status");
+    el.textContent = msg || "";
+    el.className = "status" + (cls ? " " + cls : "");
+    clearTimeout(statusTimer);
+    if (msg && cls === "bad") {
+      statusTimer = setTimeout(function () { renderStatusIdle(); }, 4000);
+    }
+  }
+  function renderStatusIdle() {
+    if (state.submitted) { say("Purchases submitted. Open your result to see your points."); return; }
+    var t = totals();
+    if (t.left < CHEAPEST) {
+      say("Budget used up. No more purchases are possible; return an item to free up money.", "done");
+    } else if (t.count === 0) {
+      say("Your ledger is empty. Pick items to start spending.");
+    } else {
+      say("");
+    }
+  }
+
+  /* ---------- summary ---------- */
+  function renderSummary() {
+    var t = totals();
+    $("sBudget").innerHTML = fmt(BUDGET) + " <small>VNĐ</small>";
+    $("sSpent").innerHTML = fmt(t.spent) + " <small>VNĐ</small>";
+    $("sRemaining").innerHTML = fmt(t.left) + " <small>VNĐ</small>";
+    $("sCount").textContent = t.count;
+    var pct = Math.min(100, (t.spent / BUDGET) * 100);
+    $("meterFill").style.width = pct + "%";
+    var low = t.left <= BUDGET * 0.1;
+    $("remBox").classList.toggle("low", low);
+    $("meter").classList.toggle("low", low);
+    $("rCount").textContent = t.count;
+    $("rSpent").textContent = fmt(t.spent) + " VNĐ";
+    renderSubmitState(t);
+  }
+
+  function renderSubmitState(t) {
+    var done = state.submitted;
+    $("totalsBox").hidden = done;
+    $("submit").hidden = done;
+    $("result").hidden = !done;
+    document.querySelector(".ledger").classList.toggle("closed", done);
+    $("hint").textContent = done
+      ? "Purchases submitted. The ledger is now closed."
+      : "Click a row to buy one. Rows crossed out cost more than your remaining budget. Your total points appear after you submit.";
+    if (done) {
+      $("fItems").textContent = t.count;
+      $("fPrice").textContent = fmt(t.spent);
+      var g = state.group.trim();
+      $("rGroup").textContent = g;
+      $("rGroup").hidden = !g;
+      $("openResult").setAttribute("href", resultLink());
+    }
+  }
+
+  /* ---------- chips ---------- */
+  function renderChips() {
+    var counts = { All: ITEMS.length };
+    ITEMS.forEach(function (it) { counts[it.type] = (counts[it.type] || 0) + 1; });
+    $("chips").innerHTML = ["All"].concat(TYPES).map(function (t) {
+      return '<button type="button" class="chip" data-type="' + esc(t) + '" aria-pressed="' + (view.type === t) + '">' +
+        esc(t) + '<span class="n">' + counts[t] + '</span></button>';
+    }).join("");
+  }
+
+  /* ---------- table ---------- */
+  function visibleItems() {
+    var q = view.q.trim().toLowerCase();
+    var list = ITEMS.filter(function (it) {
+      if (view.type !== "All" && it.type !== view.type) return false;
+      if (q && (it.name + " " + it.unit + " " + it.type).toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+    if (view.sortKey) {
+      var k = view.sortKey, d = view.sortDir;
+      list = list.slice().sort(function (a, b) {
+        var x = a[k], y = b[k];
+        if (typeof x === "string") return d * x.localeCompare(y, "vi") || a.idx - b.idx;
+        return d * (x - y) || a.idx - b.idx;
+      });
+    }
+    return list;
+  }
+
+  function renderRows() {
+    var list = visibleItems();
+    if (!list.length) {
+      $("rows").innerHTML = '<tr class="empty"><td colspan="4">No items match. Clear the search or pick another type.</td></tr>';
+      return;
+    }
+    $("rows").innerHTML = list.map(function (it) {
+      return '<tr data-id="' + esc(it.id) + '">' +
+        '<td class="type">' + esc(it.type) + '</td>' +
+        '<td class="name"><button type="button" class="buy" data-id="' + esc(it.id) + '">' +
+          '<span class="nm">' + esc(it.name) + (it.note ? ' <span class="dagger">' + esc(it.note) + '</span>' : '') + '</span><span class="qty"></span>' +
+          (it.unit ? '<span class="unit">' + esc(it.unit) + '</span>' : '') +
+        '</button></td>' +
+        '<td class="num price">' + fmt(it.price) + '</td>' +
+        '<td class="num pts hidden-pt" title="Revealed after you submit">?</td>' +
+      '</tr>';
+    }).join("");
+    updateRows();
+  }
+
+  function updateRows() {
+    var left = totals().left, closed = state.submitted;
+    var trs = $("rows").querySelectorAll("tr[data-id]");
+    for (var i = 0; i < trs.length; i++) {
+      var tr = trs[i], it = BYID[tr.getAttribute("data-id")];
+      var n = state.qty[it.id] || 0;
+      var can = it.price <= left;
+      tr.classList.toggle("owned", n > 0);
+      tr.classList.toggle("locked", !can && !closed);
+      var btn = tr.querySelector(".buy");
+      btn.setAttribute("aria-disabled", (can && !closed) ? "false" : "true");
+      btn.setAttribute("aria-label", (closed ? "" : "Buy ") + it.name + (it.unit ? ", " + it.unit : "") + ", " + fmt(it.price) + " VNĐ" +
+        (n ? ", you own " + n : "") + (!closed && !can ? ", over your remaining budget" : ""));
+      tr.querySelector(".qty").textContent = n ? "×" + n : "";
+    }
+  }
+
+  function renderSortArrows() {
+    var ths = document.querySelectorAll("thead th");
+    for (var i = 0; i < ths.length; i++) {
+      var th = ths[i], k = th.getAttribute("data-key");
+      if (!k) continue;
+      var active = view.sortKey === k;
+      th.setAttribute("aria-sort", active ? (view.sortDir === 1 ? "ascending" : "descending") : "none");
+      th.querySelector(".arrow").textContent = active ? (view.sortDir === 1 ? "▲" : "▼") : "";
+    }
+  }
+
+  /* ---------- purchases ---------- */
+  function renderReceipt(focusSel) {
+    var ids = Object.keys(state.qty).sort(function (a, b) { return BYID[a].idx - BYID[b].idx; });
+    var body = $("receiptBody");
+    if (!ids.length) {
+      body.innerHTML = '<p class="none">Nothing bought yet. Click an item in the ledger to add it here.</p>';
+    } else {
+      body.innerHTML = "<ul>" + ids.map(function (id) {
+        var it = BYID[id], n = state.qty[id];
+        var line2 = state.submitted
+          ? '<div class="line2"><span>Quantity: ' + n + '</span></div>'
+          : '<div class="line2"><span class="stepper">' +
+              '<button type="button" data-act="dec" data-id="' + esc(id) + '" aria-label="Return one ' + esc(it.name) + '">−</button>' +
+              '<span class="q" aria-label="Quantity">' + n + '</span>' +
+              '<button type="button" data-act="inc" data-id="' + esc(id) + '" aria-label="Buy one more ' + esc(it.name) + '">+</button>' +
+              '</span><span><button type="button" class="rm" data-act="rm" data-id="' + esc(id) + '">Remove</button></span></div>';
+        return '<li>' +
+          '<div class="line1"><span class="rname">' + esc(it.name) + '</span><span class="rprice">' + fmt(it.price * n) + '</span></div>' +
+          line2 +
+        '</li>';
+      }).join("") + "</ul>";
+    }
+    if (focusSel) {
+      var f = body.querySelector(focusSel);
+      if (f) f.focus();
+    }
+  }
+
+  function nudge() {
+    var b = $("remBox");
+    b.classList.remove("nudge");
+    void b.offsetWidth;
+    b.classList.add("nudge");
+  }
+
+  function afterChange(focusSel) {
+    save();
+    renderSummary();
+    updateRows();
+    renderReceipt(focusSel);
+  }
+
+  function buy(id, focusSel) {
+    if (state.submitted) return;
+    var it = BYID[id];
+    if (!it) return;
+    var t = totals();
+    if (it.price > t.left) {
+      say("Not enough budget for " + it.name + ". It costs " + fmt(it.price) + " VNĐ and you have " + fmt(t.left) + " VNĐ left.", "bad");
+      nudge();
+      return;
+    }
+    state.qty[id] = (state.qty[id] || 0) + 1;
+    afterChange(focusSel);
+    say("Bought " + it.name + " for " + fmt(it.price) + " VNĐ.");
+    if (totals().left < CHEAPEST) renderStatusIdle();
+  }
+  function giveBack(id, all, focusSel) {
+    if (state.submitted || !state.qty[id]) return;
+    var it = BYID[id];
+    if (all || state.qty[id] === 1) delete state.qty[id]; else state.qty[id] -= 1;
+    afterChange(state.qty[id] ? focusSel : null);
+    say("Returned " + it.name + " (+" + fmt(it.price) + " VNĐ back to your budget).");
+  }
+
+  /* ---------- events ---------- */
+  $("rows").addEventListener("click", function (e) {
+    var tr = e.target.closest("tr[data-id]");
+    if (!tr) return;
+    buy(tr.getAttribute("data-id"));
+  });
+
+  $("receiptBody").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-act]");
+    if (!b) return;
+    var id = b.getAttribute("data-id"), act = b.getAttribute("data-act");
+    var sel = 'button[data-act="' + act + '"][data-id="' + id + '"]';
+    if (act === "inc") buy(id, sel);
+    else if (act === "dec") giveBack(id, false, sel);
+    else if (act === "rm") giveBack(id, true, null);
+  });
+
+  $("chips").addEventListener("click", function (e) {
+    var b = e.target.closest(".chip");
+    if (!b) return;
+    view.type = b.getAttribute("data-type");
+    var t = view.type;
+    renderChips();
+    var again = $("chips").querySelector('[data-type="' + t.replace(/"/g, '\\"') + '"]');
+    if (again) again.focus();
+    renderRows();
+  });
+
+  $("search").addEventListener("input", function (e) {
+    view.q = e.target.value;
+    renderRows();
+  });
+
+  document.querySelector("thead").addEventListener("click", function (e) {
+    var th = e.target.closest("th[data-key]");
+    if (!th) return;
+    var k = th.getAttribute("data-key");
+    if (view.sortKey !== k) { view.sortKey = k; view.sortDir = 1; }
+    else if (view.sortDir === 1) { view.sortDir = -1; }
+    else { view.sortKey = null; view.sortDir = 1; }
+    renderSortArrows();
+    renderRows();
+  });
+
+  $("groupName").addEventListener("input", function (e) {
+    state.group = e.target.value;
+    save();
+    if (state.submitted) renderSubmitState(totals());
+  });
+
+  var submitTimer;
+  $("submit").addEventListener("click", function () {
+    var b = $("submit");
+    if (state.submitted) return;
+    if (totals().count === 0) {
+      say("Add at least one item before you submit.", "bad");
+      return;
+    }
+    if (!b.classList.contains("confirm")) {
+      b.classList.add("confirm");
+      b.textContent = "Click again to submit. This is final.";
+      clearTimeout(submitTimer);
+      submitTimer = setTimeout(function () { b.classList.remove("confirm"); b.textContent = "Submit purchases"; }, 5000);
+      return;
+    }
+    clearTimeout(submitTimer);
+    b.classList.remove("confirm");
+    b.textContent = "Submit purchases";
+    state.submitted = true;
+    state.submittedAt = Date.now();
+    afterChange(null);
+    renderStatusIdle();
+    sendResult();
+    window.location.href = resultLink();
+  });
+
+  var resetTimer;
+  $("reset").addEventListener("click", function () {
+    var b = $("reset");
+    if (!b.classList.contains("confirm")) {
+      b.classList.add("confirm");
+      b.textContent = "Click again to clear all purchases";
+      clearTimeout(resetTimer);
+      resetTimer = setTimeout(function () { b.classList.remove("confirm"); b.textContent = "Start over"; }, 4000);
+      return;
+    }
+    clearTimeout(resetTimer);
+    b.classList.remove("confirm");
+    b.textContent = "Start over";
+    state.qty = {};
+    state.submitted = false;
+    state.submittedAt = 0;
+    afterChange(null);
+    say("Ledger cleared. You have " + fmt(BUDGET) + " VNĐ to spend.");
+  });
+
+  /* ---------- init ---------- */
+  load();
+  $("groupName").value = state.group;
+  renderChips();
+  renderSortArrows();
+  renderRows();
+  renderSummary();
+  renderReceipt(null);
+  renderStatusIdle();
+})();
+</script>
+</body>
+</html>
